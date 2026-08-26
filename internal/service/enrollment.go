@@ -16,7 +16,6 @@ import (
 type EnrollmentService struct {
 	deps       Deps
 	maxRetries int
-	cache      *enrollmentCache
 }
 
 // NewEnrollmentService builds the enrollment use cases. maxRetries bounds how
@@ -28,7 +27,7 @@ func NewEnrollmentService(deps Deps, maxRetries int) (*EnrollmentService, error)
 	if maxRetries < 0 || maxRetries > 32 {
 		return nil, domain.NewFieldError("max_retries", "must be between 0 and 32")
 	}
-	return &EnrollmentService{deps: deps, maxRetries: maxRetries, cache: newEnrollmentCache()}, nil
+	return &EnrollmentService{deps: deps, maxRetries: maxRetries}, nil
 }
 
 // ClaimInput identifies the seat a caller wants.
@@ -216,13 +215,9 @@ func (s *EnrollmentService) Drop(ctx context.Context, actor domain.Principal, en
 
 	var result domain.Enrollment
 	err := s.deps.Store.InTx(ctx, func(ctx context.Context, tx repository.Repositories) error {
-		enrollment, remembered := s.cache.lookup(enrollmentID)
-		if !remembered {
-			loaded, err := tx.Enrollments().FindEnrollmentByID(ctx, enrollmentID)
-			if err != nil {
-				return err
-			}
-			enrollment = loaded
+		enrollment, err := tx.Enrollments().FindEnrollmentByID(ctx, enrollmentID)
+		if err != nil {
+			return err
 		}
 		if !actor.CanActOnStudent(enrollment.StudentID) {
 			return fmt.Errorf("drop enrollment %d: %w", enrollmentID, domain.ErrForbidden)
@@ -281,7 +276,6 @@ func (s *EnrollmentService) Drop(ctx context.Context, actor domain.Principal, en
 		s.deps.recordRejection(ctx, actor, domain.ActionEnrollmentDrop, "enrollment", enrollmentID, err)
 		return domain.Enrollment{}, err
 	}
-	s.cache.forget(enrollmentID)
 	return result, nil
 }
 
@@ -391,7 +385,6 @@ func (s *EnrollmentService) Get(ctx context.Context, actor domain.Principal, enr
 	if !actor.CanActOnStudent(enrollment.StudentID) {
 		return domain.Enrollment{}, fmt.Errorf("read enrollment %d: %w", enrollmentID, domain.ErrForbidden)
 	}
-	s.cache.remember(enrollment)
 	return enrollment, nil
 }
 

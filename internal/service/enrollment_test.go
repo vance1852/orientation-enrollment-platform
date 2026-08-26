@@ -300,6 +300,64 @@ func TestDropReleasesSeatAndEnqueuesPromotion(t *testing.T) {
 	}
 }
 
+func TestDropAfterWaitlistPromotionAndAReadSucceeds(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	// A second student holds the only seat of the tight section.
+	holder := h.enrollAnotherStudent("holder@campus.example", h.tightID)
+
+	// The primary student lands on the waitlist.
+	waitlisted, err := h.enrollments.Claim(ctx, h.studentPrincipal(),
+		service.ClaimInput{StudentID: h.student.ID, SectionID: h.tightID})
+	if err != nil {
+		t.Fatalf("waitlisting failed: %v", err)
+	}
+	if !waitlisted.Waitlisted {
+		t.Fatalf("expected a waitlist entry, got %+v", waitlisted)
+	}
+
+	// The student inspects the waitlist record on the enrollment page, which is
+	// the action the bug report ties to the broken drop.
+	if _, err := h.enrollments.Get(ctx, h.studentPrincipal(), waitlisted.Enrollment.ID); err != nil {
+		t.Fatalf("reading the waitlist record failed: %v", err)
+	}
+
+	// The holder drops, freeing the seat, and the waitlist is promoted.
+	if _, err := h.enrollments.Drop(ctx, h.registrarPrincipal(), holder.ID, "left the programme"); err != nil {
+		t.Fatalf("dropping the holder failed: %v", err)
+	}
+	if _, err := h.enrollments.PromoteWaitlist(ctx, h.tightID); err != nil {
+		t.Fatalf("promotion failed: %v", err)
+	}
+
+	// The student must be able to drop the now-enrolled record without re-logging
+	// in, the drop must be marked dropped with a release time, the section seat
+	// must fall to zero, and the term plan must no longer list the course.
+	dropped, err := h.enrollments.Drop(ctx, h.studentPrincipal(), waitlisted.Enrollment.ID, "schedule changed")
+	if err != nil {
+		t.Fatalf("dropping the promoted record failed: %v", err)
+	}
+	if dropped.Status != domain.EnrollmentDropped {
+		t.Fatalf("status = %s, want dropped", dropped.Status)
+	}
+	if dropped.ReleaseReason != "schedule changed" || dropped.ReleasedAt == nil {
+		t.Fatalf("release not stamped on the dropped record: %+v", dropped)
+	}
+	if section := h.section(h.tightID); section.SeatsTaken != 0 {
+		t.Fatalf("the seat must be released, got %d", section.SeatsTaken)
+	}
+	active, err := h.store.Enrollments().ActiveEnrollmentsForStudent(ctx, h.student.ID, h.term.ID)
+	if err != nil {
+		t.Fatalf("reading the term plan failed: %v", err)
+	}
+	for _, record := range active {
+		if record.SectionID == h.tightID {
+			t.Fatalf("the dropped course must not remain on the term plan, got %+v", record)
+		}
+	}
+}
+
 func TestDropRespectsWindowAndOwnership(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()

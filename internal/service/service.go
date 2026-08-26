@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/vance1852/orientation-enrollment-platform/internal/audit"
@@ -62,39 +61,6 @@ func (d Deps) logger() *slog.Logger {
 		return slog.Default()
 	}
 	return d.Logger
-}
-
-// enrollmentCache keeps the enrollment records a caller already inspected so a
-// follow-up mutation in the same session does not have to read them again.
-type enrollmentCache struct {
-	mu      sync.RWMutex
-	entries map[int64]domain.Enrollment
-}
-
-func newEnrollmentCache() *enrollmentCache {
-	return &enrollmentCache{entries: make(map[int64]domain.Enrollment)}
-}
-
-// remember stores the record a read path just handed to the caller.
-func (c *enrollmentCache) remember(record domain.Enrollment) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[record.ID] = record
-}
-
-// lookup returns the remembered record for an identifier.
-func (c *enrollmentCache) lookup(id int64) (domain.Enrollment, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	record, ok := c.entries[id]
-	return record, ok
-}
-
-// forget removes a record after the owning path changed it.
-func (c *enrollmentCache) forget(id int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.entries, id)
 }
 
 // requireRole rejects a principal that lacks the required business role.
