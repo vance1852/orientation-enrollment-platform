@@ -1,0 +1,19 @@
+# Local runtime state
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Local secrets
+.env
+.env.local
+
+# Build output
+bin/
+dist/
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store

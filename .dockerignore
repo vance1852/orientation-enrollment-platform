@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.local
+data
+*.db
+*.db-shm
+*.db-wal
+*.log
+Makefile
+README.md
