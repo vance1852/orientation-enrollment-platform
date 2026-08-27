@@ -48,11 +48,6 @@ type WaitlistJobPayload struct {
 	SectionID int64 `json:"section_id"`
 }
 
-// errBatchPlanRejected ends the batch transaction when the plan contains an item
-// the eligibility rules refused. It never reaches the caller, which receives the
-// per item outcome instead.
-var errBatchPlanRejected = errors.New("batch plan contains rejected items")
-
 // Claim allocates a seat, or a waitlist position when the section is full.
 //
 // The whole decision runs inside one transaction: the eligibility reads, the
@@ -348,43 +343,67 @@ func (s *EnrollmentService) BatchClaim(ctx context.Context, actor domain.Princip
 		return nil, fmt.Errorf("batch claim for student %d: %w", studentID, domain.ErrForbidden)
 	}
 
-	// A batch is one advising decision, so the whole plan is applied inside a
-	// single transaction and the per item outcome is reported to the caller.
+	// Each item is applied in its own transaction, so a single ineligible
+	// section only fails itself: the compliant items still land, occupy their
+	// seats and the per item outcome reflects what was actually committed. A
+	// concurrent claim that advanced a section version is replayed for that item
+	// only, mirroring the single item Claim path.
 	results := make([]domain.BatchItemResult, 0, len(sectionIDs))
-	err := s.deps.Store.InTx(ctx, func(ctx context.Context, tx repository.Repositories) error {
-		for _, sectionID := range sectionIDs {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("batch claim interrupted: %w", err)
+	for _, sectionID := range sectionIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("batch claim interrupted: %w", err)
+		}
+		results = append(results, s.claimBatchItem(ctx, actor, studentID, sectionID))
+	}
+	return results, nil
+}
+
+// claimBatchItem allocates one seat inside its own transaction and reports the
+// per item outcome. A version conflict from a concurrent claim is replayed up
+// to maxRetries times for this item alone, so it never rolls back items that
+// already committed. A terminal failure is recorded in the audit trail.
+func (s *EnrollmentService) claimBatchItem(ctx context.Context, actor domain.Principal, studentID, sectionID int64) domain.BatchItemResult {
+	req := domain.EnrollmentRequest{StudentID: studentID, SectionID: sectionID}
+	attempts := s.maxRetries + 1
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var claimed ClaimResult
+		err := s.deps.Store.InTx(ctx, func(ctx context.Context, tx repository.Repositories) error {
+			c, err := s.claimOnce(ctx, tx, actor, req)
+			if err != nil {
+				return err
 			}
-			claimed, claimErr := s.claimOnce(ctx, tx, actor, domain.EnrollmentRequest{
-				StudentID: studentID,
-				SectionID: sectionID,
-			})
-			if claimErr != nil {
-				results = append(results, domain.BatchItemResult{
-					SectionID: sectionID,
-					Code:      domain.Code(claimErr),
-					Message:   claimErr.Error(),
-				})
-				continue
-			}
-			results = append(results, domain.BatchItemResult{
+			claimed = c
+			return nil
+		})
+		if err == nil {
+			return domain.BatchItemResult{
 				SectionID: sectionID,
 				Status:    claimed.Enrollment.Status,
 				Succeeded: true,
 				Code:      "ok",
 				Message:   fmt.Sprintf("enrollment %d created", claimed.Enrollment.ID),
-			})
+			}
 		}
-		if !domain.BatchFullyApplied(results) {
-			return errBatchPlanRejected
+		if errors.Is(err, domain.ErrVersionConflict) && attempt < attempts {
+			s.deps.logger().Debug("retrying batch seat claim after version conflict",
+				"section_id", sectionID, "attempt", attempt)
+			continue
 		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, errBatchPlanRejected) {
-		return nil, err
+		s.deps.recordRejection(ctx, actor, domain.ActionEnrollmentClaim, "section", sectionID, err)
+		return domain.BatchItemResult{
+			SectionID: sectionID,
+			Code:      domain.Code(err),
+			Message:   err.Error(),
+		}
 	}
-	return results, nil
+	unsettled := fmt.Errorf("seat allocation for section %d did not settle after %d attempts: %w",
+		sectionID, attempts, domain.ErrVersionConflict)
+	s.deps.recordRejection(ctx, actor, domain.ActionEnrollmentClaim, "section", sectionID, unsettled)
+	return domain.BatchItemResult{
+		SectionID: sectionID,
+		Code:      domain.Code(unsettled),
+		Message:   unsettled.Error(),
+	}
 }
 
 // List returns the enrollments visible to the caller.

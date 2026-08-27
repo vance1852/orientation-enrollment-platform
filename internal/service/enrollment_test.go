@@ -510,6 +510,53 @@ func TestBatchClaimReportsPerItemOutcomes(t *testing.T) {
 	}
 }
 
+func TestBatchClaimPersistsCompliantItemsAlongsideRejectedOnes(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	results, err := h.enrollments.BatchClaim(ctx, h.studentPrincipal(), h.student.ID,
+		[]int64{h.openID, h.tightID, 999999})
+	if err != nil {
+		t.Fatalf("the batch call itself must succeed, got %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+
+	// The missing section must be reported as rejected, but that must not have
+	// rolled back the compliant items: their seats and enrollments must persist.
+	bySection := make(map[int64]domain.BatchItemResult, len(results))
+	for _, item := range results {
+		bySection[item.SectionID] = item
+	}
+	if !bySection[h.openID].Succeeded || bySection[h.openID].Status != domain.EnrollmentEnrolled {
+		t.Fatalf("CS110-A item = %+v", bySection[h.openID])
+	}
+	if !bySection[h.tightID].Succeeded {
+		t.Fatalf("CS210-A item = %+v", bySection[h.tightID])
+	}
+	if bySection[999999].Succeeded || bySection[999999].Code != "not_found" {
+		t.Fatalf("missing section item = %+v", bySection[999999])
+	}
+
+	if got := h.section(h.openID).SeatsTaken; got != 1 {
+		t.Fatalf("CS110-A seats taken = %d, want 1 (compliant items must persist)", got)
+	}
+	if got := h.section(h.tightID).SeatsTaken; got != 1 {
+		t.Fatalf("CS210-A seats taken = %d, want 1 (compliant items must persist)", got)
+	}
+	held, err := h.store.Enrollments().ActiveEnrollmentsForStudent(ctx, h.student.ID, h.term.ID)
+	if err != nil {
+		t.Fatalf("reading held enrollments failed: %v", err)
+	}
+	if len(held) != 2 {
+		t.Fatalf("held enrollments = %d, want 2 (only the compliant items must be saved)", len(held))
+	}
+	if h.auditCount(domain.ActionEnrollmentClaim, domain.ResultSuccess) != 2 {
+		t.Fatalf("successful claim audit entries = %d, want 2", h.auditCount(domain.ActionEnrollmentClaim, domain.ResultSuccess))
+	}
+}
+
 func TestListEnrollmentsIsScopedForStudentsAndFiltered(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
