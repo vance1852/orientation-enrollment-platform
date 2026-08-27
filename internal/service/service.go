@@ -59,13 +59,18 @@ func (d Deps) now() time.Time {
 // writeBudget bounds a mutating use case that runs on its own deadline.
 const writeBudget = 30 * time.Second
 
-// writeContext gives a mutating use case its own budget.
+// writeContext gives a mutating use case a bounded budget that still honours the
+// caller's cancellation and deadline.
 //
 // Releasing a seat touches the enrollment, the section counters, the job queue
-// and the audit trail, so the transaction is carried out on a dedicated context
-// instead of being tied to the caller.
+// and the audit trail, so the work runs on a deadline of its own. The caller's
+// cancellation and deadline are preserved on purpose: when a drop request is
+// abandoned by the client or exceeds its budget, the transaction must abort so
+// the enrollment record, the section counters and the waitlist call stay as they
+// were and the caller is told the request was cancelled instead of committing a
+// seat release nobody asked to finish.
 func (d Deps) writeContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), writeBudget)
+	return context.WithTimeout(ctx, writeBudget)
 }
 
 func (d Deps) logger() *slog.Logger {

@@ -300,6 +300,57 @@ func TestDropReleasesSeatAndEnqueuesPromotion(t *testing.T) {
 	}
 }
 
+func TestDropAbortedBeforeCompletionLeavesEverythingUntouched(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	seat, err := h.enrollments.Claim(ctx, h.studentPrincipal(),
+		service.ClaimInput{StudentID: h.student.ID, SectionID: h.tightID})
+	if err != nil {
+		t.Fatalf("claiming the seat failed: %v", err)
+	}
+	if _, err := h.enrollments.Claim(ctx, h.principal(h.otherStudnt),
+		service.ClaimInput{StudentID: h.otherStudnt.ID, SectionID: h.tightID}); err != nil {
+		t.Fatalf("waitlisting the second student failed: %v", err)
+	}
+	queuedBefore, err := h.store.Jobs().CountJobsByState(ctx, domain.JobQueued)
+	if err != nil {
+		t.Fatalf("counting jobs failed: %v", err)
+	}
+
+	// The caller gives up before the drop settles. The seat, the waitlist and the
+	// promotion queue must stay exactly as they were, and the caller is told the
+	// request was cancelled.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = h.enrollments.Drop(cancelledCtx, h.studentPrincipal(), seat.Enrollment.ID, "schedule changed")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	stored, err := h.enrollments.Get(ctx, h.studentPrincipal(), seat.Enrollment.ID)
+	if err != nil {
+		t.Fatalf("reading the enrollment failed: %v", err)
+	}
+	if stored.Status != domain.EnrollmentEnrolled {
+		t.Fatalf("an aborted drop must not move the enrollment, got %s", stored.Status)
+	}
+	section := h.section(h.tightID)
+	if section.SeatsTaken != 1 {
+		t.Fatalf("an aborted drop must not release the seat, got %d", section.SeatsTaken)
+	}
+	if section.WaitlistLength != 1 {
+		t.Fatalf("an aborted drop must not touch the waitlist, got %d", section.WaitlistLength)
+	}
+	queuedAfter, err := h.store.Jobs().CountJobsByState(ctx, domain.JobQueued)
+	if err != nil {
+		t.Fatalf("counting jobs failed: %v", err)
+	}
+	if queuedAfter != queuedBefore {
+		t.Fatalf("an aborted drop must not enqueue a promotion, got %d", queuedAfter)
+	}
+}
+
 func TestDropRespectsWindowAndOwnership(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()

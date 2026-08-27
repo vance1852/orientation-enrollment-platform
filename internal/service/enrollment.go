@@ -215,6 +215,10 @@ func (s *EnrollmentService) Drop(ctx context.Context, actor domain.Principal, en
 	writeCtx, cancelWrite := s.deps.writeContext(ctx)
 	defer cancelWrite()
 
+	if err := writeCtx.Err(); err != nil {
+		return domain.Enrollment{}, fmt.Errorf("drop enrollment %d: %w", enrollmentID, err)
+	}
+
 	var result domain.Enrollment
 	err := s.deps.Store.InTx(writeCtx, func(ctx context.Context, tx repository.Repositories) error {
 		enrollment, err := tx.Enrollments().FindEnrollmentByID(ctx, enrollmentID)
